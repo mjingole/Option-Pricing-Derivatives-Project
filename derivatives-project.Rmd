@@ -1,0 +1,286 @@
+---
+title: "Option Pricing Model"
+author: "Mayur"
+date: "30/10/2019"
+output:
+  word_document: 
+    highlight: tango
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.width = 7, fig.height = 5, warning = F, tidy.opts = T, message = F, cache = T, prompt = T, highlight = T)
+```
+
+
+# INTRODUCTION
+
+Options are derivative contracts which give the bearer of that contract the right, but not obligation, to sell or buy the underlying asset. The right can be exercised either at expiration date of the contract (European Option) or at any time till the expiration date of the contract (American Option). A call option gives the bearer of the contract the right to buy, and a put a option gives the bearer of the contract the right sell, the underlying asset. The option contracts are either traded in an exchange in standardized form or they are traded over-the-counter in customized form. When the underlying asset is a stock then the options are known as stock options. Options can either be used to earn money by speculating about the future direction of the value of underlying asset based on market opinion or they can be used to limit losses through hedging. Usually the bearer of the option contract has to pay a premium to the writer of the option contract. The premium is usually paid at the time the contract is signed. The premium is also known as the value of the option or the option price.
+
+The value of option consist of two parts: intrinsic value and extrinsic value. The intrinsic value is the amount of payoff earned if the option is exercised and the underlying asset is disposed off immediately at the market price. Extrinsic value is intrinsic value plus a premium based on the time to expiration and the volatility of the underlying asset. While the value of option decreases with decreasing time to maturity, the option value increases with increasing volatility. The value of option can be calculated using mathematical models which take into account both the intrinsic as well as extrinsic value of an option.
+
+Our purpose in this assignment is to estimate option value using two such mathematical models for non-dividend paying european options: the Black-Scholes-Merton model and the Binomial model. We will then compare these estimated values with actual market price of the option. We will also examine the Put-Call Parity relationship in all the three cases.
+
+# DATA ANALYSIS : SOURCES AND METHODOLOGY
+
+ For the purpose of our analysis we will do the case study of Netflix stocks listed on NASDAQ and its widely traded 3 month stock options. We will use an option chain with an expiration date of "08-11-2019" as our unit of analysis. All the data analysis, modelling, and visualization will be done using "R software". Specifically we will use the "quantmod" package which allows us to import option chain data for currently traded options from "Yahoo! Finance".
+
+Following are the R packages we require:
+
+```{r packages}
+library(quantmod)
+library(lubridate)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+```
+
+Following is the external customizable input for the code:
+It includes the ticker for the specific stock, the expiration date for the option, the risk free rate of interest, the number of past years' data to be used to calculate volatility, and the number of steps to used in Binomial tree. We will use the interest rate on a three-month U.S. Treasury bill as our risk free rate of interest.
+
+```{r input data}
+# NOTE: check beforehand whether the option chain data for that particular ticker and expiration date is available on Yahoo Finance
+ticker <- 'NFLX'
+expiration_date <- as.Date('2019-11-08')
+riskfree_rate <- 0.0193
+# number of past years to calculate annualized volatility
+Y <- 5
+# number of steps in Binomial Tree
+N <- 3
+```
+
+blank_empty_space
+
+```{r importing and cleaning option chain data}
+options(timeout= 4000000)
+options_chain_data <- getOptionChain(ticker, Exp = expiration_date)
+# separate call & put; select only strike, volume, last price which we need to calculate intrinsic value of an option
+calls <- options_chain_data$calls[,c('Strike', 'Last', 'Vol')]
+puts <- options_chain_data$puts[,c('Strike', 'Last', 'Vol')]
+colnames(calls)[2] <- 'Market_price'
+colnames(puts)[2] <- 'Market_price'
+
+stock_price <- getSymbols(ticker, src = 'yahoo', auto.assign = F)
+colnames(stock_price)[4] <- 'Close'
+colnames(stock_price)[6] <- 'Adjusted'
+stock_price$Returns <- diff(log(stock_price$Adjusted))
+
+contract_date <- expiration_date
+month(contract_date) <- month(expiration_date) - 3
+maturity_time <- as.numeric(expiration_date - contract_date)/365
+
+So <- as.numeric(stock_price$Close[contract_date])
+
+plot(stock_price$Close)
+
+calls %>% 
+  select(Strike, Call = Market_price) %>% 
+  inner_join(puts %>% select(Strike, Put = Market_price), by = 'Strike') %>% 
+  gather(key = 'Option_type', value = 'Option_price', -Strike) %>% 
+  ggplot(aes(x = Strike, y = Option_price)) +
+  geom_line() +
+  geom_vline(xintercept = So, col = 'red') +
+  facet_grid(rows = vars(Option_type))
+```
+
+blank_empty_space
+
+```{r checking consistency of option price data}
+# price of the option should not be less than intrinsic value
+# the intrinsic value of a call option is equal to max[St − K, 0]
+calls$intrinsic <- So - calls$Strike
+calls$dummy <- ifelse(calls$intrinsic <= calls$Market_price, 1, 0)
+number_of_inconsistent_calls <- sum(!calls$dummy)
+calls <- calls %>% filter(dummy == 1)
+
+# the intrinsic value of a put option is equal to max[K −St , 0]
+puts$intrinsic <- puts$Strike - So
+puts$dummy <- ifelse(puts$intrinsic <= puts$Market_price, 1, 0)
+number_of_inconsistent_puts <- sum(!puts$dummy)
+puts <- puts %>% filter(dummy == 1)
+```
+
+blank_empty_space
+
+# BLACK-SCHOLES OPTION PRICING MODEL
+
+blank_empty_space
+
+```{r BSM}
+
+# multiply volatility of returns by 252 to annualize it
+returns_annualized_volatility <- sd(stock_price$Returns[paste(max(year(index(stock_price))) - Y, '/')], na.rm = T)*sqrt(252)
+
+# creating a function to calculate BSM option price
+bs.opm <- function(S,K,T,r,sigma,type){
+  d1<-(log(S/K)+(r+0.5*sigma^2)*T)/(sigma*sqrt(T))
+  d2<-d1-sigma*sqrt(T) 
+  if(type=="Call"){ 
+    opt.val<-S*pnorm(d1)-K*exp(-r*T)*pnorm(d2) 
+    }
+  if(type=="Put"){ 
+    opt.val<-K*exp(-r*T)*pnorm(-d2)-S*pnorm(-d1) 
+    }
+  opt.val
+}
+
+calls$BSM_price <- vapply(X = calls$Strike, FUN = bs.opm, FUN.VALUE = double(1), S = So, T = maturity_time, r = riskfree_rate, sigma = returns_annualized_volatility, type = 'Call')
+
+puts$BSM_price <- vapply(X = puts$Strike, FUN = bs.opm, FUN.VALUE = double(1), S = So, T = maturity_time, r = riskfree_rate, sigma = returns_annualized_volatility,  type = 'Put')
+
+
+calls %>% 
+  select(Strike, Market_price, BSM_price) %>% 
+  gather(key = 'key', value = 'price', -Strike) %>% 
+  ggplot(aes(x = Strike, y = price, col = key)) +
+  geom_point() +
+  geom_vline(xintercept = So) +
+  ggtitle('Call Options') +
+  theme(legend.position="bottom")
+
+puts %>% 
+  select(Strike, Market_price, BSM_price) %>% 
+  gather(key = 'key', value = 'price', -Strike) %>% 
+  ggplot(aes(x = Strike, y = price, col = key)) +
+  geom_point() +
+  geom_vline(xintercept = So) +
+  ggtitle('Put Options') +
+  theme(legend.position="bottom")
+```
+
+blank_empty_space
+
+# BINOMIAL OPTION PRICING MODEL
+
+blank_empty_space
+
+```{r Binomial OPM}
+# Binomial OPM function
+Binomial_OPM <- function(S,K,T,r,sigma,n,type) {
+  x=NA
+  if (type=="Call") x=1
+  if (type=="Put") x=-1
+  if (is.na(x)) stop("Option Type can only be call or put")
+  dt=T/ n
+  u=exp(sigma*sqrt(dt))
+  d=1/ u
+  p=((1+r*dt)-d)/ (u-d)
+  disc<- (1+r*dt)
+  OptVal<- x*(S*u^(0:n)*d^(n:0)-K)
+  OptVal=ifelse(OptVal<0,0,OptVal)
+  for (j in seq(from=n-1,to=0,by=-1))
+    for (i in 0:j)
+      OptVal[i+1]=(p*OptVal[i+2]+(1-p)*OptVal[i+1])/disc
+  value=OptVal[1]
+  value
+}
+
+calls$Binomial_price <- vapply(calls$Strike, FUN = Binomial_OPM, FUN.VALUE = double(1), S = So, T = maturity_time, r = riskfree_rate, sigma = returns_annualized_volatility, n = N, type = 'Call')
+
+puts$Binomial_price <- vapply(puts$Strike, FUN = Binomial_OPM, FUN.VALUE = double(1), S = So, T = maturity_time, r = riskfree_rate, sigma = returns_annualized_volatility, n = N, type = 'Put')
+
+calls %>% 
+  select(Strike, Market_price, Binomial_price) %>% 
+  gather(key = 'key', value = 'price', -Strike) %>% 
+  ggplot(aes(x = Strike, y = price, col = key)) +
+  geom_point() +
+  geom_vline(xintercept = So) +
+  ggtitle('Call Options') +
+  theme(legend.position="bottom")
+
+puts %>% 
+  select(Strike, Market_price, Binomial_price) %>% 
+  gather(key = 'key', value = 'price', -Strike) %>% 
+  ggplot(aes(x = Strike, y = price, col = key)) +
+  geom_point() +
+  geom_vline(xintercept = So) +
+  ggtitle('Put Options') +
+  theme(legend.position="bottom")
+```
+
+blank_empty_space
+
+# COMPARING ALL THREE PRICES
+
+blank_empty_space
+
+```{r all three option prices together}
+calls %>% 
+  select(Strike, Market_price, BSM_price, Binomial_price) %>% 
+  gather(key = 'Pricing', value = 'Option_Price', -Strike) %>% 
+  ggplot(aes(x = Strike, y = Option_Price, col = Pricing, linetype = Pricing)) +
+  geom_line(size = 1.2) +
+  geom_vline(xintercept = So) +
+  ggtitle('Call Option') +
+  theme(legend.position="bottom")
+
+puts %>% 
+  select(Strike, Market_price, BSM_price, Binomial_price) %>% 
+  gather(key = 'Pricing', value = 'Option_Price', -Strike) %>% 
+  ggplot(aes(x = Strike, y = Option_Price, col = Pricing, linetype = Pricing)) +
+  geom_line(size = 1.2) +
+  geom_vline(xintercept = So) +
+  ggtitle('Put Option') +
+  theme(legend.position="bottom")
+```
+
+blank_empty_space
+
+# EVALUATING PUT-CALL PARITY
+
+blank_empty_space
+
+p + S = c + K exp (−rf ∗ T )
+```{r put-call parity}
+# for Market price
+parity_data_market <- puts %>% 
+  select(Strike, Put = Market_price) %>% 
+  inner_join(calls %>% select(Strike, Call = Market_price), by = 'Strike')
+
+parity_data_market$parity_put <- parity_data_market$Call + parity_data_market$Strike*exp(-riskfree_rate*maturity_time) - So
+
+parity_data_market %>% 
+  ggplot(aes(x = Put, y = parity_put)) +
+  geom_point(col = 'red', size = 2) +
+  geom_abline() +
+  ggtitle('Put-Call parity in Market prices')
+
+# for BSM price
+parity_data_BSM <- puts %>% 
+  select(Strike, Put = BSM_price) %>% 
+  inner_join(calls %>% select(Strike, Call = BSM_price), by = 'Strike')
+
+parity_data_BSM$parity_put <- parity_data_BSM$Call + parity_data_BSM$Strike*exp(-riskfree_rate*maturity_time) - So
+
+parity_data_BSM %>% 
+  ggplot(aes(x = Put, y = parity_put)) +
+  geom_point(col = 'red', size = 2) +
+  geom_abline() +
+  ggtitle('Put-Call parity in BSM prices')
+
+# for Binomial price
+parity_data_Binomial <- puts %>% 
+  select(Strike, Put = Binomial_price) %>% 
+  inner_join(calls %>% select(Strike, Call = Binomial_price), by = 'Strike')
+
+parity_data_Binomial$parity_put <- parity_data_Binomial$Call + parity_data_Binomial$Strike*exp(-riskfree_rate*maturity_time) - So
+
+parity_data_Binomial %>% 
+  ggplot(aes(x = Put, y = parity_put)) +
+  geom_point(col = 'red', size = 2) +
+  geom_abline() +
+  ggtitle('Put-Call parity in Binomial prices')
+```
+
+blank_empty_space
+
+# CONCLUSION
+
+blank_empty_space
+
+# REFERENCES
+
+blank_empty_space
+
+
+
